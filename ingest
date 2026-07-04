@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -29,8 +30,8 @@ WIKI_DIR = ROOT / "wiki"
 LOG_DIR = ROOT / "logs"
 
 # OpenAI-compatible local model endpoint.
-MODEL = "unsloth/gemma-4-E4B-it-UD-MLX-4bit"
-BASE_URL = "http://127.0.0.1:8090/v1"
+MODEL = os.environ.get("JOURNALOS_MODEL", "unsloth/gemma-4-E4B-it-UD-MLX-4bit")
+BASE_URL = os.environ.get("JOURNALOS_BASE_URL", "http://127.0.0.1:8090/v1")
 
 
 SRC_DIR = ROOT / "src" / "journalos"

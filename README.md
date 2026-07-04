@@ -47,7 +47,7 @@ The ingest script expects the server at:
 http://127.0.0.1:8090/v1
 ```
 
-You can change `MODEL` and `BASE_URL` at the top of `ingest`. You can also set server environment variables before running `./serve`.
+You can set `JOURNALOS_MODEL` and `JOURNALOS_BASE_URL` before running `ingest`. Use the same `JOURNALOS_MODEL` value for `./serve` and `python ingest ...`.
 
 ## Quick Start
 
@@ -94,6 +94,12 @@ To use another model or port:
 JOURNALOS_MODEL=/path/to/local/model JOURNALOS_PORT=8090 ./serve
 ```
 
+When using the current upstream `mlx-vlm` server with some 4-bit Gemma 4 checkpoints, non-strict model loading may be needed:
+
+```bash
+MLX_VLM_STRICT_LOAD=false JOURNALOS_MODEL=mlx-community/gemma-4-e2b-it-4bit ./serve
+```
+
 It must expose an OpenAI-compatible endpoint at:
 
 ```text
@@ -113,7 +119,7 @@ journal/2026-06-03.md
 
 ```bash
 conda activate journalos
-python ingest 2026-06-02
+JOURNALOS_MODEL=mlx-community/gemma-4-e2b-it-4bit python ingest 2026-06-02
 ```
 
 7. Ingest a date range.
