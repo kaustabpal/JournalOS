@@ -39,6 +39,8 @@ The tested setup uses `mlx_vlm.server` with:
 unsloth/gemma-4-E4B-it-UD-MLX-4bit
 ```
 
+The current upstream `mlx-vlm` repo has a dedicated Gemma 4 backend and documents `google/gemma-4-e2b-it`, `google/gemma-4-e4b-it`, `google/gemma-4-26b-a4b-it`, and `google/gemma-4-31b-it`.
+
 The ingest script expects the server at:
 
 ```text
@@ -68,6 +70,8 @@ conda activate journalos
 ```bash
 pip install -r requirements.txt
 ```
+
+JournalOS installs `mlx-vlm` from the upstream GitHub `main` branch so Gemma 4 support is available even if the PyPI package lags behind the repository.
 
 4. Start the local inference server.
 
