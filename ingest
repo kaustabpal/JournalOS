@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""JournalOS ingest entrypoint.
+
+Copy daily journal notes into ./journal, then run:
+
+  python ingest 2026-06-02
+  python ingest 2026-06-02.md
+  python ingest 2026-06-01..2026-06-10
+
+The pipeline writes wiki pages into ./wiki and detailed stage logs into ./logs.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import sys
+import time
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+
+ROOT = Path(__file__).resolve().parent
+
+# User-editable paths.
+JOURNAL_DIR = ROOT / "journal"
+WIKI_DIR = ROOT / "wiki"
+LOG_DIR = ROOT / "logs"
+
+# OpenAI-compatible local model endpoint.
+MODEL = "unsloth/gemma-4-E4B-it-UD-MLX-4bit"
+BASE_URL = "http://127.0.0.1:8090/v1"
+
+
+SRC_DIR = ROOT / "src" / "journalos"
+sys.path.insert(0, str(SRC_DIR))
+
+import staged_ingest as staged  # noqa: E402
+
+
+PIPELINE = SimpleNamespace(
+    model=MODEL,
+    base_url=BASE_URL,
+    mode="full",
+    max_tokens=1800,
+    segment_chars=1600,
+    context_format="blocks",
+    raw_max_items=8,
+    raw_format="final-blocks",
+    normalize_max_items=10,
+    placement_mode="batch",
+    placement_batch_size=4,
+    placement_repair_mode="agentic",
+)
+
+
+def parse_day(text: str) -> date:
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise SystemExit(f"Invalid date: {text}. Use YYYY-MM-DD.") from exc
+
+
+def note_for_name(name: str) -> Path:
+    value = name.strip()
+    if not value:
+        raise SystemExit("Empty note name.")
+    note = JOURNAL_DIR / (value if value.endswith(".md") else f"{value}.md")
+    if not note.exists():
+        raise SystemExit(f"Journal note not found: {note}")
+    return note
+
+
+def notes_for_range(spec: str) -> list[Path]:
+    start_text, end_text = [part.strip() for part in spec.split("..", 1)]
+    start = parse_day(start_text)
+    end = parse_day(end_text)
+    if end < start:
+        raise SystemExit("End date must be on or after start date.")
+
+    notes: list[Path] = []
+    current = start
+    while current <= end:
+        note = JOURNAL_DIR / f"{current.isoformat()}.md"
+        if note.exists():
+            notes.append(note)
+        current += timedelta(days=1)
+    if not notes:
+        raise SystemExit(f"No journal notes found in range: {spec}")
+    return notes
+
+
+def resolve_notes(specs: list[str]) -> list[Path]:
+    notes: list[Path] = []
+    for spec in specs:
+        notes.extend(notes_for_range(spec) if ".." in spec else [note_for_name(spec)])
+    return sorted(dict.fromkeys(path.resolve() for path in notes))
+
+
+def prepare_wiki(reset: bool) -> Path:
+    if reset and WIKI_DIR.exists():
+        shutil.rmtree(WIKI_DIR)
+    WIKI_DIR.mkdir(parents=True, exist_ok=True)
+    staged.ensure_scaffold(WIKI_DIR)
+    return WIKI_DIR
+
+
+def run(notes: list[Path], reset_wiki: bool) -> dict:
+    wiki = prepare_wiki(reset_wiki)
+    staged.copy_notes(notes, wiki)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    started = time.perf_counter()
+    results = []
+    for index, note in enumerate(notes, start=1):
+        result = staged.run_note(note, wiki, LOG_DIR, PIPELINE)
+        results.append(result)
+        print(f"{index}/{len(notes)} finished: {note.stem}", file=sys.stderr, flush=True)
+
+    report = {
+        "notes": len(results),
+        "seconds": round(time.perf_counter() - started, 1),
+        "wiki": str(wiki),
+        "logs": str(LOG_DIR),
+        "results": results,
+        "totals": {
+            "primary_written": sum(r["compile"]["primary_written"] for r in results),
+            "side_effects_written": sum(r["compile"]["side_effects_written"] for r in results),
+            "diagnostics": sum(r.get("diagnostics", 0) for r in results),
+            "blocking_warnings": sum(len(r.get("blocking_warnings", [])) for r in results),
+            "skipped": sum(len(r["compile"]["skipped"]) for r in results),
+        },
+    }
+    (LOG_DIR / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Build a JournalOS wiki from daily journal notes.")
+    parser.add_argument("notes", nargs="+", help="A note date/name or date range, e.g. 2026-06-02 or 2026-06-01..2026-06-10")
+    parser.add_argument("--reset-wiki", action="store_true", help="Clear ./wiki before ingesting.")
+    args = parser.parse_args()
+
+    report = run(resolve_notes(args.notes), args.reset_wiki)
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

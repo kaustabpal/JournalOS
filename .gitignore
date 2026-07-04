@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# User data and generated output.
+journal/*.md
+wiki/*
+logs/*
+
+!journal/.gitkeep
+!wiki/.gitkeep
+!logs/.gitkeep

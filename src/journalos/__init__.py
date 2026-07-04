@@ -1,0 +1,1 @@
+"""JournalOS ingest internals."""
