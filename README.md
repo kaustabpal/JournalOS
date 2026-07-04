@@ -18,6 +18,7 @@ This is an early local-first ingest pipeline. It is designed to guide the model 
 
 ```text
 JournalOS/
+  serve                  # starts the local inference server
   ingest                 # command users run
   journal/               # copy daily notes here
   wiki/                  # generated wiki output
@@ -27,9 +28,10 @@ JournalOS/
 
 ## Requirements
 
+- macOS with Apple Silicon
+- Conda or Miniconda
 - Python 3.10+
-- A running OpenAI-compatible local chat-completions server
-- A model that can follow structured prompts
+- Enough free memory to run the local model
 
 The tested setup uses `mlx_vlm.server` with:
 
@@ -43,7 +45,7 @@ The ingest script expects the server at:
 http://127.0.0.1:8090/v1
 ```
 
-You can change `MODEL` and `BASE_URL` at the top of `ingest`.
+You can change `MODEL` and `BASE_URL` at the top of `ingest`. You can also set server environment variables before running `./serve`.
 
 ## Quick Start
 
@@ -54,7 +56,39 @@ git clone <your-repo-url> JournalOS
 cd JournalOS
 ```
 
-2. Start your local LLM server.
+2. Create a conda environment.
+
+```bash
+conda create -n journalos python=3.10 -y
+conda activate journalos
+```
+
+3. Install requirements.
+
+```bash
+pip install -r requirements.txt
+```
+
+4. Start the local inference server.
+
+```bash
+./serve
+```
+
+By default this starts:
+
+```text
+model: unsloth/gemma-4-E4B-it-UD-MLX-4bit
+host: 127.0.0.1
+port: 8090
+prefill step size: 2048
+```
+
+To use another model or port:
+
+```bash
+JOURNALOS_MODEL=/path/to/local/model JOURNALOS_PORT=8090 ./serve
+```
 
 It must expose an OpenAI-compatible endpoint at:
 
@@ -62,7 +96,7 @@ It must expose an OpenAI-compatible endpoint at:
 http://127.0.0.1:8090/v1/chat/completions
 ```
 
-3. Copy notes into `journal/`.
+5. Copy notes into `journal/`.
 
 Use one Markdown file per day:
 
@@ -71,19 +105,20 @@ journal/2026-06-02.md
 journal/2026-06-03.md
 ```
 
-4. Ingest one note.
+6. Ingest one note in a second terminal.
 
 ```bash
+conda activate journalos
 python ingest 2026-06-02
 ```
 
-5. Ingest a date range.
+7. Ingest a date range.
 
 ```bash
 python ingest 2026-06-01..2026-06-10
 ```
 
-6. Review the output.
+8. Review the output.
 
 ```text
 wiki/   generated wiki pages

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL="${JOURNALOS_MODEL:-unsloth/gemma-4-E4B-it-UD-MLX-4bit}"
+HOST="${JOURNALOS_HOST:-127.0.0.1}"
+PORT="${JOURNALOS_PORT:-8090}"
+PREFILL_STEP_SIZE="${JOURNALOS_PREFILL_STEP_SIZE:-2048}"
+
+exec python -m mlx_vlm.server \
+  --model "$MODEL" \
+  --host "$HOST" \
+  --port "$PORT" \
+  --prefill-step-size "$PREFILL_STEP_SIZE" \
+  --log-level INFO

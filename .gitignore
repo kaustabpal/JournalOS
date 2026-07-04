@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+**/.DS_Store
 
 # User data and generated output.
 journal/*.md
