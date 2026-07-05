@@ -282,8 +282,18 @@ def parse_roster(text: str) -> dict[str, list[str]]:
     parts = re.split(pattern, text)
     for index in range(1, len(parts) - 1, 2):
         label = parts[index].strip().upper()
-        fields = parse_fields(parts[index + 1])
+        block = parts[index + 1]
+        fields = parse_fields(block)
         name = re.sub(r"\s+", " ", fields.get("name", "")).strip()
+        if not name:
+            # The model occasionally collapses "name: X\nevidence: Y" into
+            # a single "X: some description" line instead. Recover the
+            # name from that line's own text rather than silently dropping
+            # an entity the model clearly did list.
+            first_line = next((ln.strip() for ln in block.splitlines() if ln.strip()), "")
+            candidate, _, _ = first_line.partition(":")
+            if candidate.strip().lower() not in ("name", "evidence", ""):
+                name = re.sub(r"\s+", " ", candidate).strip()
         if not name or name.lower() in ("self", "none") or name.lower() in seen:
             continue
         seen.add(name.lower())
