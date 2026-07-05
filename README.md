@@ -6,9 +6,11 @@ The idea is simple: just write. Don't worry about organizing your thoughts, tagg
 
 If you journal every day, this adds up to something powerful: a way to actually see how your life is changing over time. How is a relationship with someone growing or fading? How is a project moving forward, or stalling? Journaling already helps you reflect. JournalOS makes that reflection easier to see, by turning scattered daily entries into one connected, evolving picture.
 
-**Right now**, JournalOS can pick out the people and pets in your life and keep a running page for each one, built from what you've written about them.
+**Right now**, JournalOS can pick out the people, pets, and projects in your life (a side project, an app, a tool, an AI assistant you use) and keep a running page for each one, built from what you've written about them, so you can track not just who is in your life, but what you are working on and how it is progressing.
 
-**Coming next**, it will do the same for problems and projects, so you can track not just who is in your life, but what you are working on and how it is progressing.
+**Coming next**, it will do the same for problems and trackers: recurring struggles or goals, and things like weight or workout logs, tracked the same way.
+
+Further out, a separate feature: connecting the dots across pages, for example noticing how a project's progress lines up with your mood, or how a habit tracker relates to a relationship, instead of treating each page in isolation.
 
 It runs entirely on your own computer, using a small local AI model. Nothing you write is ever sent anywhere.
 
@@ -41,7 +43,7 @@ Every prompt, token budget, and validation step is calibrated for this small 4-b
 **Steps**
 
 ```bash
-git clone <your-repo-url> JournalOS
+git clone https://github.com/kaustabpal/JournalOS.git
 cd JournalOS
 conda create -n journalos python=3.10 -y
 conda activate journalos
@@ -82,6 +84,12 @@ In a second terminal, copy one Markdown file per day into `journal/`, named `YYY
 cp ~/Notes/Journal/2026-06-02.md journal/
 ```
 
+`journal/` ships with five synthetic example entries (`2026-01-01.md` through `2026-01-05.md`) so you can try `python ingest` immediately after cloning and see what the wiki output looks like, without needing your own journal yet. Delete them before adding your own notes:
+
+```bash
+rm journal/2026-01-0*.md
+```
+
 `journal/` is git-ignored, so your notes are never committed, and JournalOS never writes to files in this folder.
 
 ### 3. Run ingest
@@ -91,7 +99,7 @@ conda activate journalos
 python ingest
 ```
 
-That's the command you'll use day to day: no arguments, run it whenever you've added or edited notes. It figures out what's new on its own.
+That's the command you'll use day to day: no arguments, run it whenever you've added or edited notes. It figures out what's new on its own. By default you'll see a single self-updating progress bar per note (roster, facts, sanity check, summary, each 25% of the bar), so you always know how far along a note is without a wall of text.
 
 ### Arguments
 
@@ -101,7 +109,8 @@ That's the command you'll use day to day: no arguments, run it whenever you've a
 | `python ingest 2026-06-02` | Ingest one specific note by date (also accepts a bare filename like `2026-06-02.md`). |
 | `python ingest 2026-06-01..2026-06-10` | Ingest a specific date range, inclusive. |
 | `--reset-wiki` | Wipes `wiki/` first, then rebuilds it. Use this after changing how the pipeline extracts facts, or if the wiki looks wrong and you want a clean rebuild. With no notes argument, it rebuilds from every note in `journal/`. Combined with a specific note or range, it still wipes the *whole* wiki but only rebuilds from those notes, so facts from every other note are permanently lost; use it plain (no notes argument) unless that is exactly what you want. |
-| `--log` | Add to any of the above to record every stage's prompt/output under `logs/`. Off by default. Turn it on when a run fails or produces something suspicious, then re-run just that note with `--log` to see exactly where it went wrong. |
+| `--log` | Add to any of the above to record every stage's prompt/output under `logs/`. Off by default. Turn it on when a run fails or produces something suspicious, then re-run just that note with `--log` to see exactly where it went wrong. Writes files; doesn't print anything extra to the terminal. |
+| `--verbose` / `-v` | Replace the default progress bar with a live narration of each stage and what the model actually replied, printed to the terminal as the run happens. Use this to watch the pipeline reason through a note in real time, the way you'd watch a frontier model think. Independent of `--log`, and off by default since it's a lot of text for everyday use. |
 | `--config <path>` | Use a config file other than `./config.yaml`. Rarely needed; see [Configuration](#configuration). |
 
 ### Output
@@ -110,6 +119,7 @@ That's the command you'll use day to day: no arguments, run it whenever you've a
 wiki/
   People/         one page per person (People/Self.md is you, the journal author)
   Pets/           one page per pet
+  Projects/       one page per project, app, tool, or AI assistant
   Index.md        regenerated catalog of every page
   Log.md          append-only ingest log
   Quarantine.md   facts/pages that failed validation, for human review
@@ -119,11 +129,11 @@ Each page has a `## Summary` (recency-weighted prose) followed by `## Facts` (da
 
 ## How it works
 
-This is a local-first pipeline designed for small models: the harness (Python) makes every structural decision, and the model only answers small, closed questions. Currently scoped to people and pets only (no topic/project pages yet). Each note goes through four stages:
+This is a local-first pipeline designed for small models: the harness (Python) makes every structural decision, and the model only answers small, closed questions. Currently scoped to people, pets, and projects (no topic/problem pages yet). Each note goes through four stages:
 
-1. **Roster**: one call listing the people and pets mentioned in the note.
+1. **Roster**: one call listing the people, pets, and projects (apps, tools, AI assistants) mentioned in the note.
 2. **Facts**: one call per paragraph, covering every known entity (self and everyone in the roster) at once. Chunking by paragraph means a fact can never be attributed to someone who isn't mentioned anywhere in that paragraph. Evidence quotes and subjects are validated in Python.
-3. **Sanity check**: one call per newly-created page, asking whether the name is really a living person or pet, as opposed to a project, tool, or AI assistant the journal talks about in a personified way ("brainstormed with Codex"). Only runs on new entities, not every fact.
+3. **Sanity check**: one call per newly-created page, asking which of person/pet/project best fits the name, or whether it's none of those (a company, a place) and shouldn't have a page at all. If the roster put it in the wrong category, the page is moved to the right one instead of being discarded. Only runs on new entities, not every fact.
 4. **Summary**: one call per entity that got new facts this note, writing a short recency-weighted prose summary at the top of their page. Falls back to a plain non-reasoning prompt if the reasoning attempt runs out of its token budget without reaching an answer.
 
 Facts and pages that fail validation at any stage go to `wiki/Quarantine.md` for human review instead of being guessed at. Re-running a note is always safe: bullets are deduplicated, so nothing is filed twice.
@@ -168,4 +178,4 @@ Use `--config <path>` to have `ingest` read a config file other than
 
 ## License
 
-Add a license before publishing.
+GPL-3.0. See [LICENSE](LICENSE).

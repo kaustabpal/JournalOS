@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""JournalOS wiki ingest: bare-minimum pass, people and pets only.
+"""JournalOS wiki ingest: people, pets, and projects.
 
 Design: the harness owns every structural decision (paths, sections,
 citations, dedup, the index), and the model only answers small questions:
 
-  1. roster  (1 call)            who is mentioned in the note? people vs pets
+  1. roster  (1 call)            who/what is mentioned in the note? person,
+                                  pet, or project (an app/tool/AI assistant)
   2. facts   (1 call/paragraph)  every durable fact in ONE paragraph, about
-                                  ANY entity (self or a named person/pet)
-  3. sanity  (1 call/new entity) is this NEW page actually a living person or
-                                  pet, not a project/tool/AI talked about in a
-                                  personified way? Only runs on pages created
-                                  this note, never on already-established ones
+                                  ANY entity (self or a named person/pet/project)
+  3. sanity  (1 call/new entity) does this NEW page's category (person/pet/
+                                  project) actually match what it is? Wrong
+                                  category gets moved, not a person/pet/project
+                                  at all (a company, a place) gets quarantined.
+                                  Only runs on pages created this note, never
+                                  on already-established ones
 
 Stage 2 used to ask about one entity against the WHOLE note. That avoided
 pronoun ambiguity but caused a worse failure: shown the whole note, the
@@ -32,12 +35,16 @@ confirms this is self" and then answering "correct: no" anyway). It also
 roughly quadrupled runtime.
 
 Stage 3 (the current sanity check) is a narrower, cheaper descendant of
-that idea: rather than trying to make the roster prompt perfectly exclude
-every project/tool/AI assistant up front, which turned into whack-a-mole
-against specific names (Claude, Pi, LiOS, ...) that would never fully
-generalize to whatever the author names their next project. Instead, the
-roster prompt stays permissive, and this stage catches the rare case once, per
-NEW entity, instead of re-litigating every fact.
+that idea. Adding PROJECT as a first-class roster category (instead of
+trying to keep projects/tools/AI assistants OUT of the roster, which
+turned into whack-a-mole against specific names -- Claude, Pi, LiOS, ...
+-- that would never fully generalize to whatever the author names their
+next project) removes most of the old misclassification problem at the
+source. Stage 3 is the remaining safety net: it re-checks each NEW page
+once, and if the roster still got the category wrong, moves the page to
+the right folder instead of discarding it; only things that are not a
+person, pet, or project at all (a company, a place, a generic concept)
+get quarantined.
 
 Everything the model returns is validated in Python (the evidence quote
 must actually appear in the paragraph it was drawn from, and the subject
@@ -47,7 +54,7 @@ are idempotent: re-running a note never duplicates bullets, so a crashed
 run can simply be re-run.
 
 Out of scope for this pass (deliberately): topic/pillar pages, trackers,
-routing. Those return in a later pass once people/pets are solid.
+routing. Those return in a later pass once people/pets/projects are solid.
 """
 from __future__ import annotations
 
@@ -87,6 +94,47 @@ def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def describe_stage(stage: str) -> str:
+    """A short, human-language narration of what a stage call is about to
+    do, shown when --verbose is on. Purely cosmetic; derived from the
+    stage id so call sites don't need to pass a separate description."""
+    if stage.startswith("01-roster"):
+        return "Reading the note to see who's mentioned..."
+    if stage.startswith("02-facts"):
+        return "Pulling facts out of this paragraph..."
+    if stage.startswith("03-sanity"):
+        name = stage.split("03-sanity-", 1)[-1]
+        return f"Checking whether \"{name}\" is a real person or pet..."
+    if stage.startswith("04-summary") and stage.endswith("-fallback"):
+        return "Reasoning ran long; writing a plain summary instead..."
+    if stage.startswith("04-summary"):
+        name = stage.split("04-summary-", 1)[-1]
+        return f"Writing an updated summary for \"{name}\"..."
+    return stage
+
+
+def indent(text: str) -> str:
+    lines = text.strip("\n").splitlines() or [""]
+    return "\n".join(f"      {line}" for line in lines)
+
+
+def render_progress(note: str, fraction: float, detail: str) -> None:
+    """A single self-updating progress line (default terminal output when
+    --verbose is off): 4 stages, 25% each, filled in as each completes."""
+    fraction = min(max(fraction, 0.0), 1.0)
+    width = 24
+    filled = int(width * fraction)
+    bar = "#" * filled + "-" * (width - filled)
+    line = f"{note} [{bar}] {int(fraction * 100):3d}%  {detail}"
+    sys.stderr.write("\r" + line.ljust(70))
+    sys.stderr.flush()
+
+
+def finish_progress() -> None:
+    sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
 def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
@@ -124,24 +172,32 @@ def chat(base_url: str, model: str, prompt: str, *, max_tokens: int,
         except Exception as exc:  # noqa: BLE001 - network/parse errors alike
             last_error = exc
             if attempt < attempts:
-                log(f"   model call failed ({exc}), retrying in {5 * attempt}s")
+                log(f"\n   model call failed ({exc}), retrying in {5 * attempt}s")
                 time.sleep(5 * attempt)
     raise RuntimeError(f"model call failed after {attempts} attempts: {last_error}")
 
 
 class StageLog:
     """Runs model calls, optionally recording each prompt/output pair under
-    logs/<date>/. Off by default; if a run goes wrong, re-run it with
-    logging enabled (the ingest CLI's --log flag) to get the full
-    per-stage trail needed to debug it."""
+    logs/<date>/ and optionally narrating each stage live to the terminal.
 
-    def __init__(self, out_dir: Path, settings: "Settings", enabled: bool = False):
+    enabled (--log) writes prompt/output/timing files for debugging a run
+    after the fact. verbose (--verbose) instead prints what each stage is
+    doing and what the model actually replied, as it happens; the two are
+    independent and can be combined. With neither on, run_note instead
+    shows a single self-updating percent-complete progress bar."""
+
+    def __init__(self, out_dir: Path, settings: "Settings", enabled: bool = False,
+                verbose: bool = False):
         self.out_dir = out_dir
         self.settings = settings
         self.enabled = enabled
+        self.verbose = verbose
 
     def call(self, stage: str, prompt: str, *, max_tokens: int) -> str:
         s = self.settings
+        if self.verbose:
+            log(f"-> {describe_stage(stage)}")
         t0 = time.perf_counter()
         output = chat(s.base_url, s.model, prompt, max_tokens=max_tokens,
                       temperature=s.temperature, timeout=s.timeout, attempts=s.attempts)
@@ -153,7 +209,9 @@ class StageLog:
             (stage_dir / "output.txt").write_text(output + "\n", encoding="utf-8")
             (stage_dir / "meta.json").write_text(
                 json.dumps({"seconds": seconds}) + "\n", encoding="utf-8")
-        log(f"   {stage}: {seconds}s")
+        if self.verbose:
+            log(f"   {stage}: {seconds}s")
+            log(indent(output))
         return output
 
 
@@ -191,28 +249,36 @@ def parse_labelled_blocks(text: str, labels: tuple[str, ...]) -> list[dict]:
 
 def roster_prompt(date: str, note_text: str) -> str:
     return (
-        f"List the people and pets mentioned in this journal note dated {date}.\n"
-        "The journal author (\"I\", \"me\", \"self\") is not a person to list.\n\n"
-        "Write one plain-text block per person or pet, exactly in this shape:\n\n"
+        f"List the people, pets, and projects mentioned in this journal note dated "
+        f"{date}. The journal author (\"I\", \"me\", \"self\") is not a person to list.\n\n"
+        "Write one plain-text block per person, pet, or project, exactly in this shape:\n\n"
         "PERSON\n"
         "name: their name\n"
         "evidence: exact quote mentioning them\n\n"
         "PET\n"
         "name: the pet's name\n"
         "evidence: exact quote mentioning them\n\n"
+        "PROJECT\n"
+        "name: the project, app, tool, or AI assistant's name\n"
+        "evidence: exact quote mentioning it\n\n"
+        "A PROJECT is a specific named thing the author builds, uses, or works on that "
+        "is not alive: a side project, app, tool, or AI assistant (e.g. a workout app, "
+        "an AI writing assistant called Sable). Employers, companies, and generic things "
+        "(a job in general, a city, a hobby) are not projects and should not be listed.\n"
         "If unsure whether a name is a pet or a person, use PERSON.\n"
-        "If nobody is mentioned, reply with the single word NONE.\n\n"
+        "If nothing is mentioned, reply with the single word NONE.\n\n"
         f"--- NOTE ---\n{note_text}\n--- END NOTE ---\n"
     )
 
 
 def parse_roster(text: str) -> dict[str, list[str]]:
-    """Parse PERSON/PET blocks. Split here directly (instead of reusing
-    parse_labelled_blocks) since we need to know which of the two labels
-    matched for each block, not just its fields."""
-    roster: dict[str, list[str]] = {"people": [], "pets": []}
+    """Parse PERSON/PET/PROJECT blocks. Split here directly (instead of
+    reusing parse_labelled_blocks) since we need to know which of the
+    three labels matched for each block, not just its fields."""
+    roster: dict[str, list[str]] = {"people": [], "pets": [], "projects": []}
     seen: set[str] = set()
-    pattern = r"(?im)^\s*(PERSON|PET)\b.*$"
+    pattern = r"(?im)^\s*(PERSON|PET|PROJECT)\b.*$"
+    key_by_label = {"PERSON": "people", "PET": "pets", "PROJECT": "projects"}
     parts = re.split(pattern, text)
     for index in range(1, len(parts) - 1, 2):
         label = parts[index].strip().upper()
@@ -221,7 +287,7 @@ def parse_roster(text: str) -> dict[str, list[str]]:
         if not name or name.lower() in ("self", "none") or name.lower() in seen:
             continue
         seen.add(name.lower())
-        roster["pets" if label == "PET" else "people"].append(name)
+        roster[key_by_label[label]].append(name)
     return roster
 
 
@@ -249,7 +315,7 @@ def split_paragraphs(text: str) -> list[str]:
 
 
 def chunk_facts_prompt(date: str, roster: dict, passage: str) -> str:
-    names = ["self"] + roster["people"] + roster["pets"]
+    names = ["self"] + roster["people"] + roster["pets"] + roster["projects"]
     listing = ", ".join(f'"{name}"' for name in names)
     return (
         f"Below is one passage from a longer journal note dated {date} (you are not "
@@ -302,7 +368,7 @@ def validate_chunk_fact(fields: dict, roster: dict, passage: str) -> tuple[str, 
     subject_lower = subject_raw.lower()
     canonical = "self" if subject_lower == "self" else ""
     if not canonical:
-        for name in roster["people"] + roster["pets"]:
+        for name in roster["people"] + roster["pets"] + roster["projects"]:
             if name.lower() == subject_lower:
                 canonical = name
                 break
@@ -320,39 +386,48 @@ def validate_chunk_fact(fields: dict, roster: dict, passage: str) -> tuple[str, 
 # --------------------------------------------------------------------------
 # Stage 3: sanity-check newly created entity pages.
 #
-# The roster prompt above is deliberately permissive again. It does not
-# try to exclude projects, tools, or AI assistants. Chasing that at the
-# roster stage turned into a whack-a-mole of specific examples (Claude, Pi,
-# LiOS, ...) that would never fully generalize to whatever the author names
-# their next project. Instead, catch it here, once per NEW entity page
-# rather than once per fact: this is a much smaller and more reliable job
-# than the fact-attribution "verify" stage that was dropped earlier (which
-# had to judge dozens of facts against the whole note every day; this only
-# has to judge the handful of genuinely new names that show up).
+# The roster prompt above is deliberately permissive: rather than trying to
+# perfectly sort every name into PERSON/PET/PROJECT up front (which turns
+# into whack-a-mole against specific examples that will never generalize
+# to whatever the author names their next project), this stage re-checks
+# each NEW page once, after the fact -- a much smaller and more reliable
+# job than re-verifying every fact would be. If the roster got the
+# category wrong, the page is moved to the right folder instead of being
+# thrown away; only things that are not a person, pet, or project at all
+# (a company, a place, a generic concept) get quarantined.
 # --------------------------------------------------------------------------
 
-def entity_sanity_prompt(name: str, bullets: list[str]) -> str:
+CATEGORY_FOLDER = {"PERSON": "People", "PET": "Pets", "PROJECT": "Projects"}
+FOLDER_CATEGORY = {folder: category for category, folder in CATEGORY_FOLDER.items()}
+
+
+def entity_sanity_prompt(name: str, category: str, bullets: list[str]) -> str:
     facts = "\n".join(f"- {bullet}" for bullet in bullets)
     return (
-        f"A new wiki page was just created for \"{name}\", based on these facts "
-        f"pulled from a journal note:\n{facts}\n\n"
-        f"Is \"{name}\" a real living person or pet (an animal), as opposed to a "
-        "project, app, tool, AI assistant or model, company, or other named thing? "
-        "Journals sometimes describe a tool or project in a personified way (e.g. "
-        "\"brainstormed with Codex\", \"my project LiOS\"), which can look like a "
-        "person from the facts alone -- watch for that.\n\n"
+        f"A new wiki page was just created for \"{name}\" under {category}, based on "
+        f"these facts pulled from a journal note:\n{facts}\n\n"
+        f"Which of these best describes \"{name}\"?\n"
+        "PERSON: a real living person\n"
+        "PET: a real animal\n"
+        "PROJECT: a side project, app, tool, or AI assistant the author builds, uses, "
+        "or works on (journals sometimes describe these in a personified way, e.g. "
+        "\"brainstormed with Codex\" -- watch for that)\n"
+        "NONE: something else entirely -- a company, employer, place, or generic "
+        "concept that should not have its own page\n\n"
         "Reply with exactly this shape:\n"
         "ANSWER\n"
-        "is_living_being: yes | no\n"
+        "category: PERSON | PET | PROJECT | NONE\n"
         "reason: short reason\n"
     )
 
 
-def parse_entity_sanity(text: str) -> tuple[bool, str]:
+def parse_entity_sanity(text: str, default: str) -> tuple[str, str]:
     for fields in parse_labelled_blocks(text, ("ANSWER",)):
-        value = fields.get("is_living_being", "").strip().lower()
-        return value.startswith("y"), fields.get("reason", "").strip()
-    return True, "no answer parsed, defaulting to keep"
+        value = fields.get("category", "").strip().upper()
+        if value in ("PERSON", "PET", "PROJECT", "NONE"):
+            return value, fields.get("reason", "").strip()
+        return default, "unparseable category, defaulting to keep"
+    return default, "no answer parsed, defaulting to keep"
 
 
 # --------------------------------------------------------------------------
@@ -604,6 +679,7 @@ def rebuild_index(wiki: Path) -> None:
 
     add_section("People", wiki / "People")
     add_section("Pets", wiki / "Pets")
+    add_section("Projects", wiki / "Projects")
     (wiki / "Index.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
@@ -616,7 +692,7 @@ def append_log(wiki: Path, date: str, summary: str) -> None:
 
 
 def ensure_scaffold(wiki: Path) -> None:
-    for directory in ("People", "Pets"):
+    for directory in ("People", "Pets", "Projects"):
         (wiki / directory).mkdir(parents=True, exist_ok=True)
     if not (wiki / "Index.md").exists():
         rebuild_index(wiki)
@@ -627,21 +703,26 @@ def ensure_scaffold(wiki: Path) -> None:
 # --------------------------------------------------------------------------
 
 def run_note(note: Path, wiki: Path, out_root: Path, settings: Settings,
-            enable_log: bool = False) -> dict:
+            enable_log: bool = False, verbose: bool = False) -> dict:
     date = note.stem
     note_text = note.read_text(encoding="utf-8")
     out_dir = out_root / date
     if enable_log:
         out_dir.mkdir(parents=True, exist_ok=True)
-    stages = StageLog(out_dir, settings, enabled=enable_log)
+    stages = StageLog(out_dir, settings, enabled=enable_log, verbose=verbose)
     t0 = time.perf_counter()
     log(f"=== {date} ===")
+    if not verbose:
+        render_progress(date, 0.0, "starting...")
 
     # Stage 1: roster.
     roster_reply = stages.call("01-roster", roster_prompt(date, note_text),
                                max_tokens=settings.tokens_roster)
     roster = parse_roster(roster_reply)
-    log(f"   roster: people={roster['people']} pets={roster['pets']}")
+    log(f"   roster: people={roster['people']} pets={roster['pets']} "
+        f"projects={roster['projects']}")
+    if not verbose:
+        render_progress(date, 0.25, "facts: starting...")
 
     # Entities and where each one's page lives. Self goes first only for a
     # stable log/display order.
@@ -650,6 +731,8 @@ def run_note(note: Path, wiki: Path, out_root: Path, settings: Settings,
         entities.append((name, wiki / "People" / f"{name}.md", name))
     for name in roster["pets"]:
         entities.append((name, wiki / "Pets" / f"{name}.md", name))
+    for name in roster["projects"]:
+        entities.append((name, wiki / "Projects" / f"{name}.md", name))
     page_by_name = {name: page for name, page, _ in entities}
     title_by_name = {name: title for name, _, title in entities}
 
@@ -684,38 +767,59 @@ def run_note(note: Path, wiki: Path, out_root: Path, settings: Settings,
                 touched_entities.add(subject_name)
             else:
                 duplicates += 1
+        if not verbose:
+            render_progress(date, 0.25 + 0.25 * (chunk_index / len(paragraphs)),
+                            f"facts: paragraph {chunk_index}/{len(paragraphs)}")
 
     # Stage 3: sanity-check every NEW entity page created this run (never
     # "self", which is trivially always valid). See the comment above
     # entity_sanity_prompt for why this checks pages, not every fact.
-    for rel_path in list(pages_created):
+    sanity_candidates = [p for p in pages_created if (wiki / p).stem != "Self"]
+    sanity_total = len(sanity_candidates)
+    if not verbose and sanity_total == 0:
+        render_progress(date, 0.75, "sanity: none needed")
+    for sanity_index, rel_path in enumerate(sanity_candidates, 1):
         page = wiki / rel_path
-        if page.stem == "Self":
-            continue
+        category = FOLDER_CATEGORY[page.parent.name]
         bullets = [line.strip()[2:] for line in page.read_text(encoding="utf-8").splitlines()
                   if line.strip().startswith("- ")]
         if not bullets:
             continue
         reply = stages.call(
             f"03-sanity-{slug(page.stem)}",
-            entity_sanity_prompt(page.stem, bullets),
+            entity_sanity_prompt(page.stem, category, bullets),
             max_tokens=settings.tokens_sanity,
         )
-        is_living, reason = parse_entity_sanity(reply)
-        if is_living:
-            continue
-        for bullet in bullets:
-            quarantine(wiki, date, page.stem, {"fact": bullet, "evidence": ""},
-                      f"sanity: not a living being ({reason or 'no reason given'})")
-        quarantined += len(bullets)
-        written -= len(bullets)
-        page.unlink()
-        pages_created.remove(rel_path)
-        touched_entities.discard(page.stem)
+        verdict, reason = parse_entity_sanity(reply, default=category)
+        if stages.verbose:
+            log(f"   -> category: {verdict} ({reason or 'no reason given'})")
+        if verdict == "NONE":
+            for bullet in bullets:
+                quarantine(wiki, date, page.stem, {"fact": bullet, "evidence": ""},
+                          f"sanity: not a person, pet, or project ({reason or 'no reason given'})")
+            quarantined += len(bullets)
+            written -= len(bullets)
+            page.unlink()
+            pages_created.remove(rel_path)
+            touched_entities.discard(page.stem)
+        elif verdict != category:
+            # Roster put this in the wrong bucket (e.g. a project filed as a
+            # person); move it to the right one instead of discarding it.
+            new_page = wiki / CATEGORY_FOLDER[verdict] / page.name
+            page.rename(new_page)
+            pages_created[pages_created.index(rel_path)] = new_page.relative_to(wiki).as_posix()
+            page_by_name[page.stem] = new_page
+        if not verbose:
+            render_progress(date, 0.50 + 0.25 * (sanity_index / sanity_total),
+                            f"sanity: {sanity_index}/{sanity_total} ({page.stem})")
 
     # Stage 4: recency-weighted summary for every entity that got new facts
     # this note (a page nothing changed on today keeps its existing summary).
-    for name in sorted(touched_entities):
+    summary_targets = sorted(touched_entities)
+    summary_total = len(summary_targets)
+    if not verbose and summary_total == 0:
+        render_progress(date, 1.0, "summary: none needed")
+    for summary_index, name in enumerate(summary_targets, 1):
         page = page_by_name[name]
         if not page.exists():
             continue
@@ -747,8 +851,15 @@ def run_note(note: Path, wiki: Path, out_root: Path, settings: Settings,
                 max_tokens=settings.tokens_summary_fallback,
             )
             summary_text = extract_final_summary(fallback_reply)
+        if stages.verbose:
+            log(f"   -> final summary for \"{name}\": {summary_text}")
         write_page_with_summary(page, title_by_name[name], summary_text, bullets)
+        if not verbose:
+            render_progress(date, 0.75 + 0.25 * (summary_index / summary_total),
+                            f"summary: {summary_index}/{summary_total} ({name})")
 
+    if not verbose:
+        finish_progress()
     rebuild_index(wiki)
     seconds = round(time.perf_counter() - t0, 1)
     summary = (f"{note.name} | entities: {len(entities)} | facts: {written} written, "

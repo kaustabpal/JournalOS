@@ -12,5 +12,13 @@ logs/*
 !wiki/.gitkeep
 !logs/.gitkeep
 
+# Synthetic example notes shipped with the repo (see README) are tracked;
+# everything else in journal/ (your real notes) stays untracked.
+!journal/2026-01-01.md
+!journal/2026-01-02.md
+!journal/2026-01-03.md
+!journal/2026-01-04.md
+!journal/2026-01-05.md
+
 # Local record of which notes `ingest` (no args) has already processed.
 .journalos-last-ingest

@@ -21,6 +21,7 @@ The pipeline reads each note and files durable facts into the wiki:
 
   wiki/People/       one page per person (including Self.md, the author)
   wiki/Pets/         one page per pet
+  wiki/Projects/     one page per project, app, tool, or AI assistant
   wiki/Index.md      regenerated catalog of every page
   wiki/Log.md        append-only ingest log
   wiki/Quarantine.md facts that failed validation, for human review
@@ -206,7 +207,7 @@ def prepare_wiki(reset: bool) -> Path:
     return WIKI_DIR
 
 
-def run(notes: list[Path], reset_wiki: bool, enable_log: bool) -> dict:
+def run(notes: list[Path], reset_wiki: bool, enable_log: bool, verbose: bool) -> dict:
     wiki = prepare_wiki(reset_wiki)
     if enable_log:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -215,7 +216,7 @@ def run(notes: list[Path], reset_wiki: bool, enable_log: bool) -> dict:
     results = []
     for index, note in enumerate(notes, start=1):
         try:
-            result = wiki_ingest.run_note(note, wiki, LOG_DIR, SETTINGS, enable_log)
+            result = wiki_ingest.run_note(note, wiki, LOG_DIR, SETTINGS, enable_log, verbose)
         except Exception as exc:  # noqa: BLE001 - keep going on the next note
             result = {"date": note.stem, "error": str(exc)}
             print(f"ERROR ingesting {note.stem}: {exc}", file=sys.stderr, flush=True)
@@ -262,6 +263,10 @@ def main() -> int:
     parser.add_argument("--log", action="store_true",
                         help="Record per-stage prompts/outputs and reports under ./logs "
                              "(off by default; turn on to debug a failed or suspicious run).")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Print what each stage is doing and what the model replies, "
+                             "live in the terminal, as the run happens. Off by default; "
+                             "independent of --log, which writes files instead.")
     parser.add_argument("--config", type=Path, default=None,
                         help="Path to a config file (defaults to ./config.yaml if it exists).")
     args = parser.parse_args()
@@ -273,7 +278,7 @@ def main() -> int:
     apply_config(load_config())
 
     notes = resolve_notes(args.notes, args.reset_wiki)
-    report = run(notes, args.reset_wiki, args.log)
+    report = run(notes, args.reset_wiki, args.log, args.verbose)
     print(json.dumps(report, indent=2))
     if not args.notes and report["totals"]["errors"] == 0:
         # Only record the default (no-args) selection, and only once every
