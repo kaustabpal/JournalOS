@@ -1,161 +1,170 @@
 # JournalOS
 
-JournalOS turns daily journal notes into a structured personal wiki using a local LLM.
+JournalOS reads your daily journal and turns it into an organized picture of your life, automatically.
 
-Copy Markdown journal notes into `journal/`, run `python ingest <date>`, and JournalOS writes connected wiki pages into `wiki/`. Every extracted fact keeps a dated source citation.
+The idea is simple: just write. Don't worry about organizing your thoughts, tagging them, or filing them anywhere. Write your day the way you'd talk to a friend, in a single daily journal file. JournalOS reads it and does the organizing for you.
 
-## Status
+If you journal every day, this adds up to something powerful: a way to actually see how your life is changing over time. How is a relationship with someone growing or fading? How is a project moving forward, or stalling? Journaling already helps you reflect. JournalOS makes that reflection easier to see, by turning scattered daily entries into one connected, evolving picture.
 
-This is an early local-first ingest pipeline. It is designed to guide the model with structure, not force every decision with rules. The current frozen pipeline is:
+**Right now**, JournalOS can pick out the people and pets in your life and keep a running page for each one, built from what you've written about them.
 
-1. Build note context.
-2. Extract plain-text facts.
-3. Place facts into wiki pages.
-4. Repair incomplete placements.
-5. Write the wiki pages and logs.
+**Coming next**, it will do the same for problems and projects, so you can track not just who is in your life, but what you are working on and how it is progressing.
 
-## Repository Layout
+It runs entirely on your own computer, using a small local AI model. Nothing you write is ever sent anywhere.
 
-```text
-JournalOS/
-  serve                  # starts the local inference server
-  ingest                 # command users run
-  journal/               # copy daily notes here
-  wiki/                  # generated wiki output
-  logs/                  # stage outputs and diagnostics
-  src/journalos/         # ingest implementation
-```
+To be upfront: tools like Claude or ChatGPT would likely do this job better and faster today. If you do not mind sharing your journal with a cloud AI service, those are a fine choice. JournalOS exists for people who do mind, who want this kind of help without their private thoughts ever leaving their machine. The long-term goal is to close that gap: to get a small, local, purpose-built model to a level that rivals the big cloud models, just for this one job.
 
-## Requirements
+Running locally on a small model has a real cost in speed. On the tested setup (a MacBook Air M2 with 16 GB of RAM), ingesting a single day's note takes about 1 to 5 minutes, depending on how long the note is and how many people or pets it mentions. That is the tradeoff: slower than a cloud model, but nothing ever leaves your machine.
 
-- macOS with Apple Silicon
-- Conda or Miniconda
-- Python 3.10+
-- Enough free memory to run the local model
+Each day's entry should be its own file, named `YYYY-MM-DD.md`. By default JournalOS looks for these files in the `journal/` directory, though you can change that path in `config.yaml`.
 
-The tested setup uses `mlx_vlm.server` with:
+If you use Obsidian, its daily notes feature is a natural fit: it opens the same file automatically every day, so you can just write. There is no need to split your thoughts across separate notes; JournalOS handles that separation for you when it ingests the entry.
+
+## Tested setup
+
+The harness is built and tuned specifically for **Gemma 4 E4B**. The exact model and quantization used is:
 
 ```text
 unsloth/gemma-4-E4B-it-UD-MLX-4bit
 ```
 
-The current upstream `mlx-vlm` repo has a dedicated Gemma 4 backend and documents `google/gemma-4-e2b-it`, `google/gemma-4-e4b-it`, `google/gemma-4-26b-a4b-it`, and `google/gemma-4-31b-it`.
+Every prompt, token budget, and validation step is calibrated for this small 4-bit model; a different model may need the prompts retuned. It has been tested on a **MacBook Air M2 with 16 GB of RAM**, where this quant runs comfortably.
 
-The ingest script expects the server at:
+## Installation
 
-```text
-http://127.0.0.1:8090/v1
-```
+**Requirements**
 
-You can set `JOURNALOS_MODEL` and `JOURNALOS_BASE_URL` before running `ingest`. Use the same `JOURNALOS_MODEL` value for `./serve` and `python ingest ...`.
+- Conda or Miniconda
+- Python 3.10+
+- An OpenAI-compatible chat completions server to point `ingest` at (see below)
 
-## Quick Start
-
-1. Clone the repo.
+**Steps**
 
 ```bash
 git clone <your-repo-url> JournalOS
 cd JournalOS
-```
-
-2. Create a conda environment.
-
-```bash
 conda create -n journalos python=3.10 -y
 conda activate journalos
-```
-
-3. Install requirements.
-
-```bash
 pip install -r requirements.txt
 ```
 
-JournalOS installs `mlx-vlm` from the upstream GitHub `main` branch so Gemma 4 support is available even if the PyPI package lags behind the repository.
+`ingest` itself is nearly dependency-free: its only requirement is PyYAML, used to read `config.yaml`. It works on any OS.
 
-4. Start the local inference server.
+**If you're on macOS with Apple Silicon**, JournalOS bundles a ready-to-run server (`./serve`, using `mlx-vlm`). Install its dependencies:
+
+```bash
+pip install -r requirements-serve.txt
+```
+
+This installs `mlx-vlm` from the JournalOS-compatible fork at `kaustabpal/mlx-vlm`, required for Gemma 4 support and a server compatibility patch. `mlx-vlm` only runs on Apple Silicon.
+
+**On Linux or Windows**, `./serve` won't work, since it depends on Apple's MLX framework. `ingest` still will: run any OpenAI-compatible server yourself (e.g. `vllm`, `llama.cpp`'s server, `text-generation-webui`, Ollama's OpenAI-compatible endpoint) and point `ingest` at it by setting `model.base_url` and `model.name` in `config.yaml`.
+
+## Usage
+
+### 1. Start a model server
+
+**macOS (Apple Silicon)**, using the bundled server:
 
 ```bash
 ./serve
 ```
 
-By default this starts:
+Leave this running in its own terminal. By default it serves `unsloth/gemma-4-E4B-it-UD-MLX-4bit` at `http://127.0.0.1:8090`, with non-strict parameter loading (needed for this checkpoint). `./serve` reads all of this from `config.yaml`, so to use a different model, port, host, or strict loading, edit the `model.name` and `serve:` settings there (see [Configuration](#configuration)), then run `./serve` again.
 
-```text
-model: unsloth/gemma-4-E4B-it-UD-MLX-4bit
-host: 127.0.0.1
-port: 8090
-prefill step size: 2048
-```
+**Linux, Windows, or any other server you prefer**: run your own OpenAI-compatible chat completions server and leave it running. `ingest` doesn't care what's behind the endpoint, only that it speaks the same API `./serve` does. Point `ingest` at it by editing `model.base_url` (and `model.name`) in `config.yaml`.
 
-To use another model or port:
+### 2. Add journal notes
 
-```bash
-JOURNALOS_MODEL=/path/to/local/model JOURNALOS_PORT=8090 ./serve
-```
-
-When using the current upstream `mlx-vlm` server with some 4-bit Gemma 4 checkpoints, non-strict model loading may be needed:
-
-```bash
-MLX_VLM_STRICT_LOAD=false JOURNALOS_MODEL=mlx-community/gemma-4-e2b-it-4bit ./serve
-```
-
-It must expose an OpenAI-compatible endpoint at:
-
-```text
-http://127.0.0.1:8090/v1/chat/completions
-```
-
-5. Copy notes into `journal/`.
-
-Use one Markdown file per day:
-
-```text
-journal/2026-06-02.md
-journal/2026-06-03.md
-```
-
-6. Ingest one note in a second terminal.
-
-```bash
-conda activate journalos
-JOURNALOS_MODEL=mlx-community/gemma-4-e2b-it-4bit python ingest 2026-06-02
-```
-
-7. Ingest a date range.
-
-```bash
-python ingest 2026-06-01..2026-06-10
-```
-
-8. Review the output.
-
-```text
-wiki/   generated wiki pages
-logs/   prompts, model outputs, repair logs, and report.json
-```
-
-## Notes
-
-- `--reset-wiki` clears the generated `wiki/` folder before running.
-- Quote mismatch warnings are treated as diagnostics, not hard failures.
-- The pipeline writes a primary page first, then profile side effects.
-- Person profiles are generated under `wiki/Wiki/social-connections/profiles/`.
-
-## Example
+In a second terminal, copy one Markdown file per day into `journal/`, named `YYYY-MM-DD.md`:
 
 ```bash
 cp ~/Notes/Journal/2026-06-02.md journal/
-python ingest 2026-06-02 --reset-wiki
 ```
 
-After the run:
+`journal/` is git-ignored, so your notes are never committed, and JournalOS never writes to files in this folder.
+
+### 3. Run ingest
+
+```bash
+conda activate journalos
+python ingest
+```
+
+That's the command you'll use day to day: no arguments, run it whenever you've added or edited notes. It figures out what's new on its own.
+
+### Arguments
+
+| Command | When to use it |
+|---|---|
+| `python ingest` | Everyday use. Processes only notes that are new or edited since the last run you ran this way. |
+| `python ingest 2026-06-02` | Ingest one specific note by date (also accepts a bare filename like `2026-06-02.md`). |
+| `python ingest 2026-06-01..2026-06-10` | Ingest a specific date range, inclusive. |
+| `--reset-wiki` | Wipes `wiki/` first, then rebuilds it. Use this after changing how the pipeline extracts facts, or if the wiki looks wrong and you want a clean rebuild. With no notes argument, it rebuilds from every note in `journal/`. Combined with a specific note or range, it still wipes the *whole* wiki but only rebuilds from those notes, so facts from every other note are permanently lost; use it plain (no notes argument) unless that is exactly what you want. |
+| `--log` | Add to any of the above to record every stage's prompt/output under `logs/`. Off by default. Turn it on when a run fails or produces something suspicious, then re-run just that note with `--log` to see exactly where it went wrong. |
+| `--config <path>` | Use a config file other than `./config.yaml`. Rarely needed; see [Configuration](#configuration). |
+
+### Output
 
 ```text
-wiki/Wiki/
-logs/2026-06-02/
-logs/report.json
+wiki/
+  People/         one page per person (People/Self.md is you, the journal author)
+  Pets/           one page per pet
+  Index.md        regenerated catalog of every page
+  Log.md          append-only ingest log
+  Quarantine.md   facts/pages that failed validation, for human review
 ```
+
+Each page has a `## Summary` (recency-weighted prose) followed by `## Facts` (dated bullets citing the source note, e.g. `([[2026-06-02]])`). To have those citations resolve as links in Obsidian, open this repository's root as the vault (not just `wiki/`), so `journal/YYYY-MM-DD.md` is reachable too.
+
+## How it works
+
+This is a local-first pipeline designed for small models: the harness (Python) makes every structural decision, and the model only answers small, closed questions. Currently scoped to people and pets only (no topic/project pages yet). Each note goes through four stages:
+
+1. **Roster**: one call listing the people and pets mentioned in the note.
+2. **Facts**: one call per paragraph, covering every known entity (self and everyone in the roster) at once. Chunking by paragraph means a fact can never be attributed to someone who isn't mentioned anywhere in that paragraph. Evidence quotes and subjects are validated in Python.
+3. **Sanity check**: one call per newly-created page, asking whether the name is really a living person or pet, as opposed to a project, tool, or AI assistant the journal talks about in a personified way ("brainstormed with Codex"). Only runs on new entities, not every fact.
+4. **Summary**: one call per entity that got new facts this note, writing a short recency-weighted prose summary at the top of their page. Falls back to a plain non-reasoning prompt if the reasoning attempt runs out of its token budget without reaching an answer.
+
+Facts and pages that fail validation at any stage go to `wiki/Quarantine.md` for human review instead of being guessed at. Re-running a note is always safe: bullets are deduplicated, so nothing is filed twice.
+
+### How `python ingest` (no args) decides what's new
+
+It hashes each note's content and compares it against a local record, `.journalos-last-ingest` (also git-ignored, never committed). A note is processed if it's new or its hash has changed since the last no-args run, so editing an old note re-triggers ingestion of just that note. The record only advances once every note in a run succeeds, so a failed note is retried on the next run instead of being silently skipped.
+
+## Repository Layout
+
+```text
+JournalOS/
+  serve                  # starts the bundled local inference server (macOS/Apple Silicon only)
+  ingest                 # command users run (cross-platform)
+  config.yaml            # every setting for ingest and ./serve; edit this
+  requirements.txt       # deps for ingest, just PyYAML
+  requirements-serve.txt # deps for ./serve: mlx-vlm and friends (macOS only)
+  journal/               # your daily notes (git-ignored)
+  wiki/                  # generated wiki output
+  logs/                  # only exists if you pass --log
+  src/                   # ingest implementation (wiki_ingest.py)
+  .journalos-last-ingest # local record of what's been ingested (git-ignored)
+```
+
+## Configuration
+
+All settings live in [`config.yaml`](config.yaml). Both `ingest` and
+`./serve` read it directly; there are no environment variables to set.
+Just edit it: it controls the paths, the model, the server host/port,
+per-stage token budgets, and the summary settings. Every value in the
+file is also its default, and anything you delete falls back to that
+default, so you only need to keep the lines you actually change. Each
+option is documented in the file's comments.
+
+`model.name` is shared by both tools, so set it once and `./serve` and
+`ingest` stay in sync. `model.base_url` (used by `ingest`) must point at
+the same host and port as the `serve:` section (used by `./serve`), since
+that is how `ingest` reaches the server `./serve` starts.
+
+Use `--config <path>` to have `ingest` read a config file other than
+`./config.yaml`.
 
 ## License
 

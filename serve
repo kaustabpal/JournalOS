@@ -1,10 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$(dirname "$0")"
 
-MODEL="${JOURNALOS_MODEL:-unsloth/gemma-4-E4B-it-UD-MLX-4bit}"
-HOST="${JOURNALOS_HOST:-127.0.0.1}"
-PORT="${JOURNALOS_PORT:-8090}"
-PREFILL_STEP_SIZE="${JOURNALOS_PREFILL_STEP_SIZE:-2048}"
+# All settings come from config.yaml (model.name, and the serve: section).
+# No environment variables are read for configuration; edit config.yaml.
+{
+  read -r MODEL
+  read -r HOST
+  read -r PORT
+  read -r PREFILL_STEP_SIZE
+  read -r STRICT_LOAD
+} < <(python3 - <<'PYEOF'
+import yaml
+config = yaml.safe_load(open("config.yaml", encoding="utf-8").read()) or {}
+model = config.get("model") or {}
+serve = config.get("serve") or {}
+print(model.get("name", "unsloth/gemma-4-E4B-it-UD-MLX-4bit"))
+print(serve.get("host", "127.0.0.1"))
+print(serve.get("port", 8090))
+print(serve.get("prefill_step_size", 2048))
+print(str(serve.get("strict_load", False)).lower())
+PYEOF
+)
+
+# The default Gemma 4 checkpoint has a few parameters upstream mlx-vlm
+# doesn't expect; our mlx-vlm fork can load it anyway if strict loading
+# is off. This is how that fork reads the setting, so it's set here from
+# config.yaml's serve.strict_load rather than left for the user to export.
+export MLX_VLM_STRICT_LOAD="$STRICT_LOAD"
 
 exec python -m mlx_vlm.server \
   --model "$MODEL" \

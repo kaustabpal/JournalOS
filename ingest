@@ -3,57 +3,117 @@
 
 Copy daily journal notes into ./journal, then run:
 
+  python ingest                        # notes added/changed since the last such run
   python ingest 2026-06-02
   python ingest 2026-06-02.md
   python ingest 2026-06-01..2026-06-10
 
-The pipeline writes wiki pages into ./wiki and detailed stage logs into ./logs.
+journal/ is never committed to git (see .gitignore); your notes stay on
+disk only. With no arguments, ingest compares each note's content hash
+against a local record (.journalos-last-ingest, also not committed) and
+processes only what's new or changed since the last such run. The very
+first run, or a run with no record yet, processes every note under
+./journal. --reset-wiki with no notes argument also processes every note;
+combined with a specific note or range, it clears the whole wiki but
+only rebuilds from those notes, so facts from every other note are lost.
+
+The pipeline reads each note and files durable facts into the wiki:
+
+  wiki/People/       one page per person (including Self.md, the author)
+  wiki/Pets/         one page per pet
+  wiki/Index.md      regenerated catalog of every page
+  wiki/Log.md        append-only ingest log
+  wiki/Quarantine.md facts that failed validation, for human review
+
+wiki/ holds only generated wiki pages; it never contains a copy of the
+source notes. [[YYYY-MM-DD]] citations are written as plain wikilinks; to
+have them resolve in Obsidian, open this repository's root (not just
+wiki/) as the vault, so journal/YYYY-MM-DD.md is reachable too.
+
+Nothing is written under ./logs by default. Pass --log to record every
+stage's prompt/output and a per-note/run report under ./logs; turn it
+on to debug a run that failed or produced something suspicious; re-run
+just that note or range with --log to see exactly where it went wrong.
+Re-running a note is always safe regardless: writes are deduplicated, so
+nothing is filed twice.
+
+Paths, model, endpoint, token budgets, and summary settings all live in
+config.yaml, which ingest reads automatically on every run. Edit that file
+to change any of them; see its comments for what each knob does.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import os
 import shutil
 import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
-
 
 ROOT = Path(__file__).resolve().parent
+CONFIG_FILE = ROOT / "config.yaml"
+STATE_FILE = ROOT / ".journalos-last-ingest"
 
-# User-editable paths.
+SRC_DIR = ROOT / "src"
+sys.path.insert(0, str(SRC_DIR))
+
+import wiki_ingest  # noqa: E402
+
+# Paths and the resolved Settings. These start at the built-in defaults and
+# are replaced by apply_config() in main() once config.yaml (if any) is read.
 JOURNAL_DIR = ROOT / "journal"
 WIKI_DIR = ROOT / "wiki"
 LOG_DIR = ROOT / "logs"
-
-# OpenAI-compatible local model endpoint.
-MODEL = os.environ.get("JOURNALOS_MODEL", "unsloth/gemma-4-E4B-it-UD-MLX-4bit")
-BASE_URL = os.environ.get("JOURNALOS_BASE_URL", "http://127.0.0.1:8090/v1")
+SETTINGS = wiki_ingest.Settings()
 
 
-SRC_DIR = ROOT / "src" / "journalos"
-sys.path.insert(0, str(SRC_DIR))
+def load_config() -> dict:
+    """Read config.yaml. The repo ships one, so it normally exists; if it's
+    been deleted, fall back to built-in defaults (empty config)."""
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        import yaml  # noqa: E402
+    except ImportError:
+        raise SystemExit(
+            "config.yaml needs PyYAML, which isn't installed.\n"
+            "Install dependencies with:  pip install -r requirements.txt")
+    data = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise SystemExit("config.yaml must be a mapping of settings (key: value).")
+    return data
 
-import staged_ingest as staged  # noqa: E402
 
+def apply_config(config: dict) -> None:
+    """Fold config.yaml over the built-in defaults. Updates the module
+    globals used throughout the rest of the script."""
+    global JOURNAL_DIR, WIKI_DIR, LOG_DIR, SETTINGS
 
-PIPELINE = SimpleNamespace(
-    model=MODEL,
-    base_url=BASE_URL,
-    mode="full",
-    max_tokens=1800,
-    segment_chars=1600,
-    context_format="blocks",
-    raw_max_items=8,
-    raw_format="final-blocks",
-    normalize_max_items=10,
-    placement_mode="batch",
-    placement_batch_size=4,
-    placement_repair_mode="agentic",
-)
+    paths = config.get("paths") or {}
+    JOURNAL_DIR = ROOT / paths.get("journal", "journal")
+    WIKI_DIR = ROOT / paths.get("wiki", "wiki")
+    LOG_DIR = ROOT / paths.get("logs", "logs")
+
+    model = config.get("model") or {}
+    tokens = config.get("tokens") or {}
+    summary = config.get("summary") or {}
+    s = wiki_ingest.Settings()
+    SETTINGS = wiki_ingest.Settings(
+        model=model.get("name", s.model),
+        base_url=model.get("base_url", s.base_url),
+        temperature=model.get("temperature", s.temperature),
+        timeout=model.get("timeout_seconds", s.timeout),
+        attempts=model.get("attempts", s.attempts),
+        tokens_roster=tokens.get("roster", s.tokens_roster),
+        tokens_facts=tokens.get("facts", s.tokens_facts),
+        tokens_sanity=tokens.get("sanity", s.tokens_sanity),
+        tokens_summary=tokens.get("summary", s.tokens_summary),
+        tokens_summary_fallback=tokens.get("summary_fallback", s.tokens_summary_fallback),
+        summary_window_days=summary.get("window_days", s.summary_window_days),
+        summary_use_reasoning=summary.get("use_reasoning", s.summary_use_reasoning),
+    )
 
 
 def parse_day(text: str) -> date:
@@ -92,7 +152,46 @@ def notes_for_range(spec: str) -> list[Path]:
     return notes
 
 
-def resolve_notes(specs: list[str]) -> list[Path]:
+def all_notes() -> list[Path]:
+    notes = sorted(JOURNAL_DIR.glob("*.md"))
+    if not notes:
+        raise SystemExit(f"No journal notes found in {JOURNAL_DIR}")
+    return notes
+
+
+def note_hash(note: Path) -> str:
+    return hashlib.sha256(note.read_bytes()).hexdigest()
+
+
+def load_manifest() -> dict[str, str]:
+    if not STATE_FILE.exists():
+        return {}
+    return json.loads(STATE_FILE.read_text())
+
+
+def changed_notes() -> list[Path]:
+    """Notes under journal/ that are new or whose content changed since the
+    last successful default (no-args) run, per a local content-hash record.
+    Falls back to every note if there's no record yet (the first run)."""
+    manifest = load_manifest()
+    if not manifest:
+        return all_notes()
+
+    notes = [note for note in all_notes() if manifest.get(note.name) != note_hash(note)]
+    if not notes:
+        raise SystemExit("No new or changed journal notes since the last ingest run.")
+    return notes
+
+
+def mark_ingested(notes: list[Path]) -> None:
+    manifest = load_manifest()
+    manifest.update({note.name: note_hash(note) for note in notes})
+    STATE_FILE.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def resolve_notes(specs: list[str], reset_wiki: bool) -> list[Path]:
+    if not specs:
+        return all_notes() if reset_wiki else changed_notes()
     notes: list[Path] = []
     for spec in specs:
         notes.extend(notes_for_range(spec) if ".." in spec else [note_for_name(spec)])
@@ -103,48 +202,84 @@ def prepare_wiki(reset: bool) -> Path:
     if reset and WIKI_DIR.exists():
         shutil.rmtree(WIKI_DIR)
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
-    staged.ensure_scaffold(WIKI_DIR)
+    wiki_ingest.ensure_scaffold(WIKI_DIR)
     return WIKI_DIR
 
 
-def run(notes: list[Path], reset_wiki: bool) -> dict:
+def run(notes: list[Path], reset_wiki: bool, enable_log: bool) -> dict:
     wiki = prepare_wiki(reset_wiki)
-    staged.copy_notes(notes, wiki)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    if enable_log:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
     results = []
     for index, note in enumerate(notes, start=1):
-        result = staged.run_note(note, wiki, LOG_DIR, PIPELINE)
+        try:
+            result = wiki_ingest.run_note(note, wiki, LOG_DIR, SETTINGS, enable_log)
+        except Exception as exc:  # noqa: BLE001 - keep going on the next note
+            result = {"date": note.stem, "error": str(exc)}
+            print(f"ERROR ingesting {note.stem}: {exc}", file=sys.stderr, flush=True)
         results.append(result)
+        if enable_log:
+            # Write the report after every note so a crash never loses progress.
+            report = build_report(results, wiki, started, enable_log)
+            (LOG_DIR / "report.json").write_text(json.dumps(report, indent=2) + "\n",
+                                                 encoding="utf-8")
         print(f"{index}/{len(notes)} finished: {note.stem}", file=sys.stderr, flush=True)
 
-    report = {
+    return build_report(results, wiki, started, enable_log)
+
+
+def build_report(results: list[dict], wiki: Path, started: float, enable_log: bool) -> dict:
+    ok = [r for r in results if "error" not in r]
+    return {
         "notes": len(results),
         "seconds": round(time.perf_counter() - started, 1),
         "wiki": str(wiki),
-        "logs": str(LOG_DIR),
+        "logs": str(LOG_DIR) if enable_log else None,
         "results": results,
         "totals": {
-            "primary_written": sum(r["compile"]["primary_written"] for r in results),
-            "side_effects_written": sum(r["compile"]["side_effects_written"] for r in results),
-            "diagnostics": sum(r.get("diagnostics", 0) for r in results),
-            "blocking_warnings": sum(len(r.get("blocking_warnings", [])) for r in results),
-            "skipped": sum(len(r["compile"]["skipped"]) for r in results),
+            "facts_written": sum(r["facts_written"] for r in ok),
+            "duplicates_skipped": sum(r["duplicates_skipped"] for r in ok),
+            "quarantined": sum(r["quarantined"] for r in ok),
+            "pages_created": sum(len(r["pages_created"]) for r in ok),
+            "errors": len(results) - len(ok),
         },
     }
-    (LOG_DIR / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    return report
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a JournalOS wiki from daily journal notes.")
-    parser.add_argument("notes", nargs="+", help="A note date/name or date range, e.g. 2026-06-02 or 2026-06-01..2026-06-10")
-    parser.add_argument("--reset-wiki", action="store_true", help="Clear ./wiki before ingesting.")
+    parser.add_argument("notes", nargs="*",
+                        help="A note date/name or date range, e.g. 2026-06-02 or 2026-06-01..2026-06-10. "
+                             "If omitted, ingests only notes that are new or changed since the "
+                             "last such run.")
+    parser.add_argument("--reset-wiki", action="store_true",
+                        help="Clear ./wiki before ingesting. With no notes argument, rebuilds "
+                             "from every note under ./journal. Combined with a specific note or "
+                             "range, it still clears the whole wiki but only rebuilds from those "
+                             "notes, so facts from every other note are lost.")
+    parser.add_argument("--log", action="store_true",
+                        help="Record per-stage prompts/outputs and reports under ./logs "
+                             "(off by default; turn on to debug a failed or suspicious run).")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Path to a config file (defaults to ./config.yaml if it exists).")
     args = parser.parse_args()
 
-    report = run(resolve_notes(args.notes), args.reset_wiki)
+    if args.config is not None:
+        if not args.config.exists():
+            raise SystemExit(f"Config file not found: {args.config}")
+        globals()["CONFIG_FILE"] = args.config.resolve()
+    apply_config(load_config())
+
+    notes = resolve_notes(args.notes, args.reset_wiki)
+    report = run(notes, args.reset_wiki, args.log)
     print(json.dumps(report, indent=2))
+    if not args.notes and report["totals"]["errors"] == 0:
+        # Only record the default (no-args) selection, and only once every
+        # note in this run succeeded; otherwise a failed note would be
+        # silently skipped on the next default run.
+        mark_ingested(notes)
     return 0
 
 

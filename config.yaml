@@ -1,0 +1,47 @@
+# JournalOS configuration.
+#
+# ingest reads this file automatically on every run; just edit the values
+# below. Every value shown is the default; anything you delete falls back to
+# that same default, so you only need to keep the lines you actually change.
+#
+# The defaults are tuned for Gemma 4 E4B (4-bit) on a MacBook Air M2 / 16 GB.
+# A different model may need the token budgets and prompts retuned.
+
+# Where files live, relative to the repo root (absolute paths also work).
+paths:
+  journal: journal   # source notes you drop in (YYYY-MM-DD.md)
+  wiki: wiki         # generated wiki pages
+  logs: logs         # per-stage debug logs (only written when --log is passed)
+
+# The model server ingest talks to (any OpenAI-compatible endpoint).
+model:
+  name: unsloth/gemma-4-E4B-it-UD-MLX-4bit
+  base_url: http://127.0.0.1:8090/v1
+  temperature: 1.0        # Gemma's recommended sampling temperature
+  timeout_seconds: 240    # give up on a single call after this long
+  attempts: 3             # retries (with backoff) before a call is considered failed
+
+# ./serve reads model.name above plus this section. host/port here must
+# match the host/port in model.base_url above, since that is what ingest
+# uses to reach the same server. Only used by ./serve; ignored if you run
+# your own server instead (e.g. on Linux/Windows).
+serve:
+  host: 127.0.0.1
+  port: 8090
+  prefill_step_size: 2048
+  strict_load: false     # off works around a parameter mismatch in the
+                          # default checkpoint; set true if yours needs it
+
+# Max output tokens per pipeline stage. Raise a stage's budget if its
+# answers get cut off; lower it to run faster / use less memory.
+tokens:
+  roster: 600             # stage 1: list people & pets in the note
+  facts: 1800             # stage 2: extract facts, per paragraph
+  sanity: 300             # stage 3: is this new page a real person/pet?
+  summary: 2048           # stage 4: reasoning summary attempt
+  summary_fallback: 400   # stage 4: plain summary if reasoning ran long
+
+# Stage 4 summary behaviour.
+summary:
+  window_days: 60         # only summarize facts from the last N days
+  use_reasoning: true     # think-then-answer prompt (false = direct answer)

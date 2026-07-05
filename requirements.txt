@@ -1,4 +1,2 @@
-requests>=2.31.0
-mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@main
-transformers>=4.51.0
-huggingface-hub>=0.30.0
+# ingest reads config.yaml, which needs a YAML parser.
+PyYAML>=6.0

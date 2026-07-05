@@ -11,3 +11,6 @@ logs/*
 !journal/.gitkeep
 !wiki/.gitkeep
 !logs/.gitkeep
+
+# Local record of which notes `ingest` (no args) has already processed.
+.journalos-last-ingest
